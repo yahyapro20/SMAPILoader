@@ -63,38 +63,6 @@ public class LauncherActivity : AppCompatActivity
         }
     }
 
-    private static bool AssetGameVerify()
-    {
-        try
-        {
-            if (StardewApkTool.IsInstalled == false)
-            {
-                var currentPackage = StardewApkTool.CurrentPackageInfo;
-                if (currentPackage != null)
-                    switch (currentPackage.PackageName)
-                    {
-                        case StardewApkTool.GamePlayStorePackageName:
-                            ToastNotifyTool.Notify("Please Download Game From Play Store");
-                            break;
-                        case StardewApkTool.GameGalaxyStorePackageName:
-                            ToastNotifyTool.Notify("Please Download Game From Galaxy Store");
-                            break;
-                    }
-                else
-                    ToastNotifyTool.Notify("Please Download Game From Play Store Or Galaxy Store");
-
-                return false;
-            }
-        }
-        catch (Exception ex)
-        {
-            ToastNotifyTool.Notify("err;" + ex);
-            return false;
-        }
-
-        return true;
-    }
-
     private void AssertRequirement()
     {
         //check if 32bit not support
@@ -104,14 +72,6 @@ public class LauncherActivity : AppCompatActivity
             Finish();
             return;
         }
-
-        //Assert Game Requirement
-        if (AssetGameVerify() == false)
-        {
-            Finish();
-            return;
-        }
-
     }
 
 
@@ -152,8 +112,8 @@ public class LauncherActivity : AppCompatActivity
             var localDateTimeString = localDateTimeOffset.ToString("HH:mm:ss dd/MM/yyyy");
             launcherInfoLines.AppendLine($"Build: {localDateTimeString} (d/m/y)");
 
-            //set support game version
-            launcherInfoLines.AppendLine($"Support Game Version: {StardewApkTool.GameVersionSupport} Or Later");
+            //set game version info
+            launcherInfoLines.AppendLine("Game Version Check: Disabled");
             launcherInfoLines.AppendLine("Your Game Version: " + StardewApkTool.CurrentGameVersion);
             launcherInfoLines.AppendLine("Discord: Stardew SMAPI Thailand");
             launcherInfoLines.AppendLine("Developer: NRTnarathip, Eky-Team");
