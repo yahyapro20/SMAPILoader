@@ -41,25 +41,7 @@ internal static class StardewApkTool
 
     public static PackageInfo CurrentPackageInfo => _currentPackageInfo;
 
-    public static bool IsInstalled
-    {
-        get
-        {
-            if (CurrentPackageInfo == null)
-                return false;
-
-            //play store
-            if (IsGameFromPlayStore)
-            {
-                var version = CurrentPackageInfo.VersionName;
-                var splitApks = CurrentPackageInfo.ApplicationInfo?.SplitSourceDirs;
-                return splitApks?.Count == 2;
-            }
-
-            //samsung
-            return true;
-        }
-    }
+    public static bool IsInstalled => CurrentPackageInfo != null;
 
     public static Android.Content.Context GetContext => Application.Context;
     public static string? BaseApkPath => CurrentPackageInfo?.ApplicationInfo?.PublicSourceDir;
@@ -73,9 +55,10 @@ internal static class StardewApkTool
                     return null;
 
                 if (IsGameFromPlayStore)
-                    return CurrentPackageInfo.ApplicationInfo.SplitSourceDirs?.FirstOrDefault(path => path.Contains("split_config.arm64"));
+                    return CurrentPackageInfo.ApplicationInfo.SplitSourceDirs?.FirstOrDefault(path => path.Contains("split_config.arm64"))
+                        ?? BaseApkPath;
 
-                // Samsung: assemblies are in the base APK
+                // Samsung and single-APK installs keep assemblies in the base APK.
                 return BaseApkPath;
             }
             catch (Exception ex)
@@ -97,9 +80,10 @@ internal static class StardewApkTool
 
                 //play store
                 if (IsGameFromPlayStore)
-                    return CurrentPackageInfo.ApplicationInfo.SplitSourceDirs?.First(path => path.Contains("split_content"));
+                    return CurrentPackageInfo.ApplicationInfo.SplitSourceDirs?.FirstOrDefault(path => path.Contains("split_content"))
+                        ?? BaseApkPath;
 
-                //samsung
+                // Samsung and single-APK installs keep content in the base APK.
                 return BaseApkPath;
             }
             catch (Exception ex)
@@ -142,5 +126,5 @@ internal static class StardewApkTool
             }
         }
     }
-    public static bool IsGameVersionSupport => CurrentGameVersion >= GameVersionSupport;
+    public static bool IsGameVersionSupport => true;
 }

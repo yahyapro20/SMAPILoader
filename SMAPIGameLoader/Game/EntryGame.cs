@@ -17,16 +17,8 @@ internal static class EntryGame
     static void LaunchGameActivityInternal(Activity launcherActivity)
     {
         //ToastNotifyTool.Notify("Starting Game..");
-        //check game it's can launch with version
-
         try
         {
-            if (StardewApkTool.IsGameVersionSupport == false)
-            {
-                ToastNotifyTool.Notify("Not support game version: " + StardewApkTool.CurrentGameVersion + ", please update game");
-                return;
-            }
-
             if (SMAPIInstaller.IsInstalled is false)
             {
                 ToastNotifyTool.Notify("Please install SMAPI!!");
