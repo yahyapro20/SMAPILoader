@@ -1,0 +1,253 @@
+name: Build SMAPI APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Game APK
+        shell: pwsh
+        run: |
+          $url = "https://www.dl.farsroid.com/game/Stardew-Valley-1.6.15.3-Mod%28www.FarsRoid.com%29.apk"
+          Write-Host "Downloading Stardew Valley APK..."
+          Write-Host "URL: $url"
+          
+          try {
+            Invoke-WebRequest -Uri $url -OutFile "game.apk" -UseBasicParsing -Headers @{
+              "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            $size = (Get-Item "game.apk").Length
+            Write-Host "SUCCESS: Downloaded $([math]::Round($size/1MB, 2)) MB"
+          } catch {
+            Write-Host "DOWNLOAD FAILED: $_"
+            Write-Host "Trying alternative method..."
+            
+            # Fallback with curl
+            curl -L -o "game.apk" -H "User-Agent: Mozilla/5.0" $url
+            
+            if (Test-Path "game.apk") {
+              $size = (Get-Item "game.apk").Length
+              Write-Host "curl SUCCESS: $([math]::Round($size/1MB, 2)) MB"
+            } else {
+              Write-Host "FATAL: Could not download APK"
+              exit 1
+            }
+          }
+
+      - name: Extract APK and Explore
+        shell: pwsh
+        run: |
+          Write-Host "========================================="
+          Write-Host "  EXTRACTING APK CONTENTS"
+          Write-Host "========================================="
+          
+          $extractDir = "apk_contents"
+          New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+          Expand-Archive -Path "game.apk" -DestinationPath $extractDir -Force
+          
+          Write-Host "`n=== TOP LEVEL ==="
+          Get-ChildItem $extractDir | ForEach-Object { 
+            Write-Host "  $($_.Name) $(if($_.PSIsContainer){'[DIR]'}else{"($([math]::Round($_.Length/1KB))KB)"})"
+          }
+          
+          Write-Host "`n=== ALL DIRECTORIES ==="
+          Get-ChildItem $extractDir -Recurse -Directory | ForEach-Object { Write-Host "  $($_.FullName)" }
+          
+          Write-Host "`n=== ALL .dll FILES ==="
+          $dlls = Get-ChildItem $extractDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue
+          if ($dlls) {
+            $dlls | ForEach-Object { Write-Host "  $($_.FullName) ($([math]::Round($_.Length/1KB))KB)" }
+          } else {
+            Write-Host "  (none found)"
+          }
+          
+          Write-Host "`n=== ALL .blob FILES ==="
+          $blobs = Get-ChildItem $extractDir -Recurse -Filter "*.blob" -ErrorAction SilentlyContinue
+          if ($blobs) {
+            $blobs | ForEach-Object { Write-Host "  $($_.FullName) ($([math]::Round($_.Length/1MB, 2))MB)" }
+          } else {
+            Write-Host "  (none found)"
+          }
+          
+          Write-Host "`n=== ALL .so FILES ==="
+          Get-ChildItem $extractDir -Recurse -Filter "*.so" -ErrorAction SilentlyContinue | ForEach-Object { 
+            Write-Host "  $($_.FullName) ($([math]::Round($_.Length/1MB, 2))MB)" 
+          }
+          
+          Write-Host "`n=== FILES LARGER THAN 1MB ==="
+          Get-ChildItem $extractDir -Recurse -File | Where-Object { $_.Length -gt 1MB } | 
+            Sort-Object Length -Descending | Select-Object -First 30 |
+            ForEach-Object { Write-Host "  $($_.FullName) ($([math]::Round($_.Length/1MB, 2))MB)" }
+
+      - name: Extract Game DLLs
+        shell: pwsh
+        run: |
+          Write-Host "========================================="
+          Write-Host "  EXTRACTING GAME DLLs"
+          Write-Host "========================================="
+          
+          $extractDir = "apk_contents"
+          $outDir = "DependenciesDll"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+          
+          $needed = @("StardewValley.dll", "StardewValley.GameData.dll", "MonoGame.Framework.dll")
+          $found = @()
+          
+          # === Strategy 1: Direct DLL files ===
+          Write-Host "`n--- Strategy 1: Direct DLL search ---"
+          foreach ($dll in $needed) {
+            $match = Get-ChildItem $extractDir -Recurse -Filter $dll -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($match) {
+              Copy-Item $match.FullName (Join-Path $outDir $dll) -Force
+              $found += $dll
+              Write-Host "  [OK] $dll ($([math]::Round($match.Length/1MB, 2)) MB)"
+            } else {
+              Write-Host "  [--] $dll not found directly"
+            }
+          }
+          
+          # === Strategy 2: Assembly Blob ===
+          if ($found.Count -lt 3) {
+            Write-Host "`n--- Strategy 2: Assembly Blob extraction ---"
+            $blobs = Get-ChildItem $extractDir -Recurse -Include "*.blob","assemblies*" -File -ErrorAction SilentlyContinue | 
+                     Where-Object { $_.Length -gt 100KB }
+            
+            foreach ($blobFile in $blobs) {
+              Write-Host "  Processing: $($blobFile.Name) ($([math]::Round($blobFile.Length/1MB, 2)) MB)"
+              $blob = [System.IO.File]::ReadAllBytes($blobFile.FullName)
+              
+              if ($blob.Length -lt 12) { continue }
+              
+              $magic = [BitConverter]::ToUInt32($blob, 0)
+              $version = [BitConverter]::ToUInt32($blob, 4)
+              $count = [BitConverter]::ToUInt32($blob, 8)
+              Write-Host "  Magic=0x$($magic.ToString('X8')) Ver=$version Count=$count"
+              
+              if ($count -gt 0 -and $count -lt 500) {
+                $offset = 12
+                for ($i = 0; $i -lt $count; $i++) {
+                  try {
+                    $nameLen = [BitConverter]::ToUInt32($blob, $offset)
+                    $offset += 4
+                    if ($nameLen -le 0 -or $nameLen -gt 500) { break }
+                    
+                    $name = [System.Text.Encoding]::UTF8.GetString($blob, $offset, $nameLen)
+                    $offset += $nameLen
+                    $asmOffset = [BitConverter]::ToUInt32($blob, $offset)
+                    $offset += 4
+                    $asmSize = [BitConverter]::ToUInt32($blob, $offset)
+                    $offset += 4
+                    
+                    if ($needed -contains $name -and $found -notcontains $name) {
+                      $asmData = New-Object byte[] $asmSize
+                      [Array]::Copy($blob, $asmOffset, $asmData, 0, $asmSize)
+                      [System.IO.File]::WriteAllBytes((Join-Path $outDir $name), $asmData)
+                      $found += $name
+                      Write-Host "  [OK] Extracted from blob: $name ($([math]::Round($asmSize/1MB, 2)) MB)"
+                    }
+                  } catch {
+                    Write-Host "  [!!] Parse error at index ${i}: $_"
+                    break
+                  }
+                }
+              }
+            }
+          }
+          
+          # === Strategy 3: Check assemblies folder patterns ===
+          if ($found.Count -lt 3) {
+            Write-Host "`n--- Strategy 3: Alternative paths ---"
+            $altPaths = @(
+              "$extractDir\assemblies",
+              "$extractDir\assets\assemblies", 
+              "$extractDir\assets",
+              "$extractDir\lib"
+            )
+            foreach ($p in $altPaths) {
+              if (Test-Path $p) {
+                Write-Host "  Checking: $p"
+                Get-ChildItem $p -File -ErrorAction SilentlyContinue | Select-Object -First 10 |
+                  ForEach-Object { Write-Host "    $($_.Name) ($([math]::Round($_.Length/1KB))KB)" }
+              }
+            }
+          }
+          
+          # === Final Report ===
+          Write-Host "`n========================================="
+          Write-Host "  RESULT: $($found.Count)/3 DLLs found"
+          Write-Host "========================================="
+          $found | ForEach-Object { Write-Host "  [OK] $_" }
+          $missing = $needed | Where-Object { $found -notcontains $_ }
+          if ($missing) {
+            $missing | ForEach-Object { Write-Host "  [XX] $_ MISSING" }
+            Write-Host "`nERROR: Cannot proceed without all DLLs."
+            Write-Host "Check the logs above to see what's inside the APK."
+            exit 1
+          }
+          
+          Write-Host "`nAll DLLs ready!"
+          Get-ChildItem $outDir | Format-Table Name, @{N='Size(MB)';E={[math]::Round($_.Length/1MB, 2)}} -AutoSize
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install Android Workload
+        run: dotnet workload install android
+
+      - name: Install Custom Mono Runtime
+        shell: pwsh
+        run: |
+          $packDir = Get-ChildItem "$env:DOTNET_ROOT\packs\Microsoft.NETCore.App.Runtime.Mono.android-arm64" | Select-Object -First 1
+          if (-not $packDir) {
+            Write-Host "ERROR: Mono pack directory not found!"
+            Get-ChildItem "$env:DOTNET_ROOT\packs" -ErrorAction SilentlyContinue
+            exit 1
+          }
+          $target = Join-Path $packDir.FullName "runtimes\android-arm64\native\libmonosgen-2.0.so"
+          Copy-Item "SharedLibs\native\arm64-v8a\libmonosgen-2.0.so" $target -Force
+          Write-Host "Custom Mono runtime installed: $target"
+
+      - name: Prepare Build Dependencies
+        shell: pwsh
+        run: |
+          $dllDir = "..\SMAPI-Android-1.6\src\DependenciesDll"
+          New-Item -ItemType Directory -Path $dllDir -Force | Out-Null
+          Copy-Item "DependenciesDll\*.dll" $dllDir -Force
+          Write-Host "Build dependencies ready:"
+          Get-ChildItem $dllDir | ForEach-Object { Write-Host "  $($_.Name)" }
+
+      - name: Build SMAPI APK
+        run: dotnet build SMAPIGameLoader/SMAPIGameLoader.csproj -c Release
+
+      - name: Find and Upload APK
+        shell: pwsh
+        run: |
+          Write-Host "=== Searching for built APK ==="
+          $apks = Get-ChildItem -Recurse -Filter "*.apk" -ErrorAction SilentlyContinue
+          $apks | ForEach-Object { Write-Host "  $($_.FullName) ($([math]::Round($_.Length/1MB, 2)) MB)" }
+          
+          if ($apks.Count -eq 0) {
+            Write-Host "ERROR: No APK found after build!"
+            exit 1
+          }
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SMAPI-Loader-APK
+          path: '**/*.apk'
