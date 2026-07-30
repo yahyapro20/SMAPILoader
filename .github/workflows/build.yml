@@ -16,11 +16,12 @@ jobs:
         shell: pwsh
         run: |
           $url = "https://www.dl.farsroid.com/game/Stardew-Valley-1.6.15.3-Mod%28www.FarsRoid.com%29.apk"
-          Write-Host "Downloading..."
+          Write-Host "Downloading Stardew Valley APK..."
           Invoke-WebRequest -Uri $url -OutFile "game.apk" -UseBasicParsing -Headers @{
             "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
           }
-          Write-Host "Downloaded: $([math]::Round((Get-Item game.apk).Length/1MB, 2)) MB"
+          $size = (Get-Item "game.apk").Length
+          Write-Host "Downloaded: $([math]::Round($size/1MB, 2)) MB"
 
       - name: Extract APK
         shell: pwsh
@@ -33,12 +34,12 @@ jobs:
       - name: Install Python LZ4
         run: pip install lz4
 
-      - name: Extract Game DLLs (V2 XABA format)
+      - name: Extract Game DLLs
         shell: pwsh
         run: |
           $script = @'
           import struct, os, sys
-          
+
           def parse_elf_payload(filepath):
               with open(filepath, 'rb') as f:
                   elf = f.read()
@@ -75,47 +76,41 @@ jobs:
                   if name == 'payload':
                       return elf[off:off+sz]
               raise ValueError("no payload section")
-          
+
           so_path = sys.argv[1]
           out_dir = sys.argv[2]
           needed = ["StardewValley.dll", "StardewValley.GameData.dll", "MonoGame.Framework.dll"]
           os.makedirs(out_dir, exist_ok=True)
-          
+
           print("[1] ELF payload extraction...")
           P = parse_elf_payload(so_path)
           print(f"    Payload: {len(P)} bytes")
-          
-          # === HEADER (20 bytes) ===
+
           magic, raw_ver, local_cnt, global_cnt, idx_bytes = struct.unpack_from('<5I', P, 0)
           ver = raw_ver & 0xFF
-          print(f"[2] XABA header:")
-          print(f"    magic=0x{magic:08X} version={ver}")
-          print(f"    local_entries={local_cnt} global_entries={global_cnt} index_bytes={idx_bytes}")
+          print(f"[2] XABA: magic=0x{magic:08X} ver={ver} local={local_cnt} global={global_cnt} idx_bytes={idx_bytes}")
           if magic != 0x41424158:
               print("FATAL: bad magic"); sys.exit(1)
-          
+
           off = 20
-          
-          # === V2: GLOBAL INDEX FIRST (12 bytes per entry) ===
+
           if ver >= 2:
               idx_total = global_cnt * 12
-              print(f"[3] Skipping global index: {global_cnt} x 12 = {idx_total} bytes")
+              print(f"[3] Skipping global index: {idx_total} bytes")
               off += idx_total
-          
-          # === LOCAL ENTRIES (V2=28 bytes, V1=24 bytes) ===
+
           entry_sz = 28 if ver >= 2 else 24
           entries = []
           for i in range(local_cnt):
               if ver >= 2:
                   f = struct.unpack_from('<7I', P, off)
-                  entries.append((f[1], f[2]))  # data_offset, data_size
+                  entries.append((f[1], f[2]))
               else:
                   f = struct.unpack_from('<6I', P, off)
                   entries.append((f[0], f[1]))
               off += entry_sz
-          print(f"[4] Read {local_cnt} entries ({entry_sz}B each), offset={off}")
-          
-          # === NAME TABLE ===
+          print(f"[4] Read {local_cnt} entries, offset={off}")
+
           names = []
           for i in range(local_cnt):
               nlen = struct.unpack_from('<I', P, off)[0]
@@ -127,15 +122,13 @@ jobs:
               else:
                   names.append(f"__unknown_{i}__")
           print(f"[5] Read {len(names)} names, offset={off}")
-          
-          # Print all
+
           print(f"\n=== ALL {local_cnt} ASSEMBLIES ===")
           for i in range(local_cnt):
               d, s = entries[i]
               tag = " ***" if (names[i] if names[i].endswith('.dll') else names[i]+'.dll') in needed else ""
               print(f"  [{i:2d}] {names[i]:50s} off={d:8d} sz={s:8d}{tag}")
-          
-          # === EXTRACT ===
+
           print(f"\n=== EXTRACTING ===")
           found = []
           for i, nm in enumerate(names):
@@ -147,13 +140,13 @@ jobs:
                       import lz4.block
                       usz = struct.unpack_from('<I', raw, 8)[0]
                       raw = lz4.block.decompress(raw[12:], uncompressed_size=usz)
-                      print(f"  {dll}: decompressed XALZ -> {len(raw)} bytes")
+                      print(f"  {dll}: XALZ decompressed -> {len(raw)} bytes")
                   mz = raw[:2] == b'MZ' if len(raw) >= 2 else False
                   print(f"  {dll}: {len(raw)} bytes [{'MZ-OK' if mz else 'NO-MZ: '+raw[:8].hex() if raw else 'EMPTY'}]")
                   with open(os.path.join(out_dir, dll), 'wb') as fo:
                       fo.write(raw)
                   found.append(dll)
-          
+
           print(f"\n=== RESULT: {len(found)}/{len(needed)} ===")
           ok = True
           for n in needed:
@@ -203,8 +196,18 @@ jobs:
       - name: Build APK
         run: dotnet build SMAPIGameLoader/SMAPIGameLoader.csproj -c Release
 
+      - name: Cleanup large files
+        shell: pwsh
+        run: |
+          Remove-Item "game.apk" -Force -ErrorAction SilentlyContinue
+          Remove-Item "apk_contents" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleaned. Remaining APKs:"
+          Get-ChildItem -Recurse -Filter "*.apk" -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "  $($_.FullName) ($([math]::Round($_.Length/1MB,2)) MB)"
+          }
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: SMAPI-Loader-APK
-          path: '**/*.apk'
+          path: 'SMAPIGameLoader/bin/**/*.apk'
