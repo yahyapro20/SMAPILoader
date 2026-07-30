@@ -26,24 +26,18 @@ jobs:
       - name: Extract APK
         shell: pwsh
         run: |
-          Write-Host "Extracting APK..."
           Expand-Archive -Path "game.apk" -DestinationPath "apk_contents" -Force
-          Write-Host "Done."
-          
           $blobFile = "apk_contents\lib\arm64-v8a\libassemblies.arm64-v8a.blob.so"
           if (Test-Path $blobFile) {
-            $s = (Get-Item $blobFile).Length
-            Write-Host "Assembly blob found: $([math]::Round($s/1MB, 2)) MB"
+            Write-Host "Blob found: $([math]::Round((Get-Item $blobFile).Length/1MB, 2)) MB"
           } else {
-            Write-Host "ERROR: blob file not found!"
-            Get-ChildItem "apk_contents\lib\arm64-v8a" | ForEach-Object { Write-Host $_.Name }
-            exit 1
+            Write-Host "ERROR: blob not found!"; exit 1
           }
 
       - name: Install Python LZ4
         run: pip install lz4
 
-      - name: Extract Game DLLs from Assembly Store
+      - name: Extract Game DLLs
         shell: pwsh
         run: |
           $script = @'
@@ -53,82 +47,47 @@ jobs:
               with open(filepath, 'rb') as f:
                   magic = f.read(4)
                   if magic != b'\x7fELF':
-                      raise ValueError("Not an ELF file")
+                      raise ValueError("Not ELF")
                   ei_class = struct.unpack('B', f.read(1))[0]
                   is_64 = (ei_class == 2)
-                  
+                  f.seek(0)
+                  hdr = f.read(64 if is_64 else 52)
                   if is_64:
-                      f.seek(0)
-                      hdr = f.read(64)
                       e_shoff = struct.unpack_from('<Q', hdr, 40)[0]
                       e_shentsize = struct.unpack_from('<H', hdr, 58)[0]
                       e_shnum = struct.unpack_from('<H', hdr, 60)[0]
                       e_shstrndx = struct.unpack_from('<H', hdr, 62)[0]
                   else:
-                      f.seek(0)
-                      hdr = f.read(52)
                       e_shoff = struct.unpack_from('<I', hdr, 32)[0]
                       e_shentsize = struct.unpack_from('<H', hdr, 46)[0]
                       e_shnum = struct.unpack_from('<H', hdr, 48)[0]
                       e_shstrndx = struct.unpack_from('<H', hdr, 50)[0]
-                  
                   sections = []
                   for i in range(e_shnum):
                       f.seek(e_shoff + i * e_shentsize)
+                      sh = f.read(64 if is_64 else 40)
+                      sh_name = struct.unpack_from('<I', sh, 0)[0]
                       if is_64:
-                          sh = f.read(64)
-                          sh_name = struct.unpack_from('<I', sh, 0)[0]
                           sh_offset = struct.unpack_from('<Q', sh, 24)[0]
                           sh_size = struct.unpack_from('<Q', sh, 32)[0]
                       else:
-                          sh = f.read(40)
-                          sh_name = struct.unpack_from('<I', sh, 0)[0]
                           sh_offset = struct.unpack_from('<I', sh, 16)[0]
                           sh_size = struct.unpack_from('<I', sh, 20)[0]
                       sections.append((sh_name, sh_offset, sh_size))
-                  
                   strtab_off = sections[e_shstrndx][1]
                   strtab_sz = sections[e_shstrndx][2]
                   f.seek(strtab_off)
                   strtab = f.read(strtab_sz)
-                  
                   for name_idx, off, sz in sections:
                       end = strtab.index(b'\x00', name_idx)
                       name = strtab[name_idx:end].decode('utf-8', errors='replace')
-                      print(f"  ELF section: '{name}' offset={off} size={sz}")
                       if name == 'payload':
                           f.seek(off)
                           return f.read(sz)
-                  
-                  raise ValueError("payload section not found in ELF")
-          
-          def parse_xaba(data):
-              magic, ver, count, idx_count, idx_size = struct.unpack_from('<5I', data, 0)
-              print(f"  XABA magic=0x{magic:08X} ver={ver} entries={count} idx_size={idx_size}")
-              if magic != 0x41424158:
-                  raise ValueError(f"Bad magic: 0x{magic:08X}")
-              
-              off = 20
-              descriptors = []
-              for i in range(count):
-                fields = struct.unpack_from('<7I', data, off)
-                descriptors.append((fields[1], fields[2]))  # data_offset, data_size
-                off += 28
-              
-              off += idx_size  # skip index
-              
-              names = []
-              for i in range(count):
-                  nlen = struct.unpack_from('<I', data, off)[0]
-                  off += 4
-                  name = data[off:off+nlen].decode('utf-8')
-                  off += nlen
-                  names.append(name)
-              
-              return descriptors, names, data
+                  raise ValueError("payload section not found")
           
           def decompress_if_needed(asm_data):
-              if asm_data[:4] == b'XALZ':
+              if len(asm_data) >= 12 and asm_data[:4] == b'XALZ':
                   import lz4.block
                   uncomp_size = struct.unpack_from('<I', asm_data, 8)[0]
                   return lz4.block.decompress(asm_data[12:], uncompressed_size=uncomp_size)
@@ -139,37 +98,93 @@ jobs:
           needed = ["StardewValley.dll", "StardewValley.GameData.dll", "MonoGame.Framework.dll"]
           os.makedirs(out_dir, exist_ok=True)
           
-          print(f"[1] Parsing ELF: {so_path}")
-          payload = parse_elf_payload(so_path)
-          print(f"  Payload extracted: {len(payload)} bytes")
+          print("[1] Parsing ELF...")
+          data = parse_elf_payload(so_path)
+          print(f"    Payload: {len(data)} bytes")
           
-          print(f"[2] Parsing XABA assembly store...")
-          descriptors, names, data = parse_xaba(payload)
+          magic, ver, count, idx_count, idx_size = struct.unpack_from('<5I', data, 0)
+          extended = (ver & 0x80000000) != 0
+          entry_size = 32 if extended else 28
+          print(f"[2] XABA: magic=0x{magic:08X} ver=0x{ver:08X} extended={extended}")
+          print(f"    count={count} idx_count={idx_count} idx_size={idx_size} entry_size={entry_size}")
           
-          print(f"[3] Extracting {len(needed)} needed DLLs...")
+          # Parse descriptors
+          off = 20
+          descriptors = []
+          for i in range(count):
+              nfields = entry_size // 4
+              f = struct.unpack_from(f'<{nfields}I', data, off)
+              descriptors.append((f[1], f[2]))  # data_offset, data_size
+              off += entry_size
+          
+          # Skip index
+          off += idx_size
+          
+          # Parse names
+          names = []
+          for i in range(count):
+              nlen = struct.unpack_from('<I', data, off)[0]
+              off += 4
+              name = data[off:off+nlen].decode('utf-8')
+              off += nlen
+              names.append(name)
+          
+          # Print ALL entries for debugging
+          print(f"\n[3] All {count} assemblies:")
+          for i in range(count):
+              doff, dsz = descriptors[i]
+              marker = " <<<" if (names[i] + ('' if names[i].endswith('.dll') else '.dll')) in needed else ""
+              print(f"    [{i:2d}] {names[i]:50s} off={doff:8d} sz={dsz:8d}{marker}")
+          
+          # Extract needed DLLs
+          print(f"\n[4] Extracting...")
           found = []
-          for name, (doff, dsz) in zip(names, descriptors):
+          for i, name in enumerate(names):
               dll = name if name.endswith('.dll') else name + '.dll'
               if dll in needed:
+                  doff, dsz = descriptors[i]
                   raw = data[doff:doff+dsz]
                   asm = decompress_if_needed(raw)
+                  
+                  # Verify
+                  mz_ok = len(asm) >= 2 and asm[0:2] == b'MZ'
+                  status = "MZ-OK" if mz_ok else f"NO-MZ(first:{asm[:8].hex() if asm else 'empty'})"
+                  print(f"    {dll}: raw={dsz} final={len(asm)} [{status}]")
+                  
                   path = os.path.join(out_dir, dll)
-                  with open(path, 'wb') as f:
-                      f.write(asm)
+                  with open(path, 'wb') as fout:
+                      fout.write(asm)
                   found.append(dll)
-                  print(f"  [OK] {dll} -> {len(asm)} bytes")
           
-          print(f"\n[RESULT] {len(found)}/{len(needed)} DLLs extracted")
+          # Fallback: MZ scan if extraction failed
+          if len(found) < 3 or any(os.path.getsize(os.path.join(out_dir, f)) == 0 for f in found):
+              print(f"\n[5] FALLBACK: Scanning for MZ headers in payload...")
+              mz_positions = []
+              for pos in range(0, len(data) - 64):
+                  if data[pos] == 0x4D and data[pos+1] == 0x5A:
+                      # Check for PE signature
+                      try:
+                          pe_off = struct.unpack_from('<I', data, pos + 60)[0]
+                          if pe_off < 1024 and data[pos+pe_off:pos+pe_off+4] == b'PE\x00\x00':
+                              mz_positions.append(pos)
+                              if len(mz_positions) <= 10:
+                                  print(f"    MZ+PE at offset {pos}")
+                      except:
+                          pass
+              print(f"    Total valid PE assemblies found: {len(mz_positions)}")
+          
+          print(f"\n[RESULT] {len(found)}/{len(needed)} DLLs")
           for n in needed:
-              s = "OK" if n in found else "MISSING"
-              print(f"  [{s}] {n}")
+              p = os.path.join(out_dir, n)
+              if os.path.exists(p):
+                  sz = os.path.getsize(p)
+                  print(f"    {'OK' if sz > 0 else 'EMPTY'} {n} ({sz} bytes)")
+              else:
+                  print(f"    MISSING {n}")
           
-          if len(found) < len(needed):
-              print("\nAll assemblies in store:")
-              for n in sorted(names):
-                  print(f"  - {n}")
+          if any(not os.path.exists(os.path.join(out_dir, n)) or os.path.getsize(os.path.join(out_dir, n)) == 0 for n in needed):
+              print("\nFAILED: Some DLLs are missing or empty!")
               sys.exit(1)
-          
           print("\nSUCCESS!")
           '@
           
@@ -204,7 +219,7 @@ jobs:
           $dllDir = "..\SMAPI-Android-1.6\src\DependenciesDll"
           New-Item -ItemType Directory -Path $dllDir -Force | Out-Null
           Copy-Item "DependenciesDll\*.dll" $dllDir -Force
-          Write-Host "DLLs ready:"
+          Write-Host "DLLs:"
           Get-ChildItem $dllDir | ForEach-Object { Write-Host "  $($_.Name) ($([math]::Round($_.Length/1MB, 2)) MB)" }
 
       - name: Build SMAPI APK
