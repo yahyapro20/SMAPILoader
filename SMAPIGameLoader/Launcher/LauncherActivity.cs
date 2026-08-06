@@ -45,6 +45,9 @@ public class LauncherActivity : AppCompatActivity
 
         //run utils scripts
         ProcessAdbExtras();
+
+        LogTool.Info("SMAPI Loader started");
+        LogTool.Info($"Device: {Build.Manufacturer} {Build.Model}, Android {Build.VERSION.Release}");
     }
 
     private void SetDarkMode()
