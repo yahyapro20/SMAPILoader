@@ -47,118 +47,103 @@ jobs:
                   raise ValueError("Not ELF")
               is64 = elf[4] == 2
               if is64:
-                  e_shoff = struct.unpack_from('<Q', elf, 40)[0]
-                  e_shentsize = struct.unpack_from('<H', elf, 58)[0]
-                  e_shnum = struct.unpack_from('<H', elf, 60)[0]
-                  e_shstrndx = struct.unpack_from('<H', elf, 62)[0]
+                  e_shoff = struct.unpack_from('=Q', elf, 0x28)[0]
+                  e_shentsize = struct.unpack_from('=H', elf, 0x3A)[0]
+                  e_shnum = struct.unpack_from('=H', elf, 0x3C)[0]
+                  e_shstrndx = struct.unpack_from('=H', elf, 0x3E)[0]
               else:
-                  e_shoff = struct.unpack_from('<I', elf, 32)[0]
-                  e_shentsize = struct.unpack_from('<H', elf, 46)[0]
-                  e_shnum = struct.unpack_from('<H', elf, 48)[0]
-                  e_shstrndx = struct.unpack_from('<H', elf, 50)[0]
-              sections = []
+                  e_shoff = struct.unpack_from('=I', elf, 0x20)[0]
+                  e_shentsize = struct.unpack_from('=H', elf, 0x2E)[0]
+                  e_shnum = struct.unpack_from('=H', elf, 0x30)[0]
+                  e_shstrndx = struct.unpack_from('=H', elf, 0x32)[0]
+              shstr_off = e_shoff + e_shentsize * e_shstrndx
+              if is64:
+                  shstr_addr = struct.unpack_from('=Q', elf, shstr_off + 0x18)[0]
+              else:
+                  shstr_addr = struct.unpack_from('=I', elf, shstr_off + 0x16)[0]
               for i in range(e_shnum):
-                  b = e_shoff + i * e_shentsize
-                  nm = struct.unpack_from('<I', elf, b)[0]
+                  off = e_shoff + e_shentsize * i
                   if is64:
-                      off = struct.unpack_from('<Q', elf, b+24)[0]
-                      sz = struct.unpack_from('<Q', elf, b+32)[0]
+                      sh_type = struct.unpack_from('=I', elf, off + 0x04)[0]
+                      sh_offset = struct.unpack_from('=Q', elf, off + 0x18)[0]
+                      sh_size = struct.unpack_from('=Q', elf, off + 0x20)[0]
+                      sh_name = struct.unpack_from('=I', elf, off + 0x00)[0]
                   else:
-                      off = struct.unpack_from('<I', elf, b+16)[0]
-                      sz = struct.unpack_from('<I', elf, b+20)[0]
-                  sections.append((nm, off, sz))
-              st_off = sections[e_shstrndx][1]
-              st_sz = sections[e_shstrndx][2]
-              strtab = elf[st_off:st_off+st_sz]
-              for nm_i, off, sz in sections:
-                  end = strtab.index(b'\x00', nm_i)
-                  name = strtab[nm_i:end].decode('ascii')
-                  if name == 'payload':
-                      return elf[off:off+sz]
-              raise ValueError("no payload section")
+                      sh_type = struct.unpack_from('=I', elf, off + 0x04)[0]
+                      sh_offset = struct.unpack_from('=I', elf, off + 0x10)[0]
+                      sh_size = struct.unpack_from('=I', elf, off + 0x14)[0]
+                      sh_name = struct.unpack_from('=I', elf, off + 0x00)[0]
+                  name = elf[shstr_addr + sh_name:shstr_addr + sh_name + 50]
+                  name = name.split(b'\x00')[0].decode('utf-8', errors='ignore')
+                  if name == ".payload":
+                      return elf[sh_offset:sh_offset + sh_size]
+              raise ValueError("No .payload section")
 
-          so_path = sys.argv[1]
-          out_dir = sys.argv[2]
-          needed = ["StardewValley.dll", "StardewValley.GameData.dll", "MonoGame.Framework.dll"]
-          os.makedirs(out_dir, exist_ok=True)
-
-          print("[1] ELF payload extraction...")
-          P = parse_elf_payload(so_path)
-          print(f"    Payload: {len(P)} bytes")
-
-          magic, raw_ver, local_cnt, global_cnt, idx_bytes = struct.unpack_from('<5I', P, 0)
-          ver = raw_ver & 0xFF
-          print(f"[2] XABA: magic=0x{magic:08X} ver={ver} local={local_cnt} global={global_cnt} idx_bytes={idx_bytes}")
-          if magic != 0x41424158:
-              print("FATAL: bad magic"); sys.exit(1)
-
-          off = 20
-
-          if ver >= 2:
-              idx_total = global_cnt * 12
-              print(f"[3] Skipping global index: {idx_total} bytes")
-              off += idx_total
-
-          entry_sz = 28 if ver >= 2 else 24
-          entries = []
-          for i in range(local_cnt):
+          def parse_assembly_store(P):
+              if len(P) < 32 or P[:4] != b'XABA':
+                  raise ValueError("Not assembly store")
+              ver = struct.unpack_from('<I', P, 4)[0]
+              local_cnt = struct.unpack_from('<I', P, 8)[0]
+              global_cnt = struct.unpack_from('<I', P, 12)[0]
+              off = 32
               if ver >= 2:
-                  f = struct.unpack_from('<7I', P, off)
-                  entries.append((f[1], f[2]))
-              else:
-                  f = struct.unpack_from('<6I', P, off)
-                  entries.append((f[0], f[1]))
-              off += entry_sz
-          print(f"[4] Read {local_cnt} entries, offset={off}")
+                  idx_total = global_cnt * 12
+                  print(f"[3] Skipping global index: {idx_total} bytes")
+                  off += idx_total
 
-          names = []
-          for i in range(local_cnt):
-              nlen = struct.unpack_from('<I', P, off)[0]
-              off += 4
-              if 0 < nlen < 512:
-                  nm = P[off:off+nlen].decode('utf-8')
+              entry_sz = 28 if ver >= 2 else 24
+              entries = []
+              for i in range(local_cnt):
+                  if ver >= 2:
+                      f = struct.unpack_from('<7I', P, off)
+                      entries.append((f[1], f[2]))
+                  else:
+                      f = struct.unpack_from('<6I', P, off)
+                      entries.append((f[0], f[1]))
+                  off += entry_sz
+              print(f"[4] Read {local_cnt} entries, offset={off}")
+
+              names = []
+              for i in range(local_cnt):
+                  nlen = struct.unpack_from('=B', P, off)[0]
+                  off += 1
+                  names.append(P[off:off + nlen].decode('utf-8'))
                   off += nlen
-                  names.append(nm)
-              else:
-                  names.append(f"__unknown_{i}__")
-          print(f"[5] Read {len(names)} names, offset={off}")
+              print(f"[5] Read {len(names)} names")
 
-          print(f"\n=== ALL {local_cnt} ASSEMBLIES ===")
-          for i in range(local_cnt):
-              d, s = entries[i]
-              tag = " ***" if (names[i] if names[i].endswith('.dll') else names[i]+'.dll') in needed else ""
-              print(f"  [{i:2d}] {names[i]:50s} off={d:8d} sz={s:8d}{tag}")
+              data_start = struct.unpack_from('<I', P, 20)[0]
+              print(f"[6] Data starts at: {data_start}")
 
-          print(f"\n=== EXTRACTING ===")
-          found = []
-          for i, nm in enumerate(names):
-              dll = nm if nm.endswith('.dll') else nm + '.dll'
-              if dll in needed:
-                  doff, dsz = entries[i]
-                  raw = P[doff:doff+dsz]
+              out_dir = sys.argv[2] if len(sys.argv) > 2 else "DependenciesDll"
+              os.makedirs(out_dir, exist_ok=True)
+
+              needed = ["StardewValley.dll", "StardewValley.GameData.dll", "MonoGame.Framework.dll"]
+              found = []
+              for idx, (hash32, raw_len) in enumerate(entries):
+                  name = names[idx] if idx < len(names) else f"unknown_{idx}"
+                  raw = P[data_start:data_start + raw_len]
+                  data_start += raw_len
                   if len(raw) >= 12 and raw[:4] == b'XALZ':
                       import lz4.block
-                      usz = struct.unpack_from('<I', raw, 8)[0]
+                      usz = struct.unpack_from('<I', raw, 4)[0]
                       raw = lz4.block.decompress(raw[12:], uncompressed_size=usz)
-                      print(f"  {dll}: XALZ decompressed -> {len(raw)} bytes")
-                  mz = raw[:2] == b'MZ' if len(raw) >= 2 else False
-                  print(f"  {dll}: {len(raw)} bytes [{'MZ-OK' if mz else 'NO-MZ: '+raw[:8].hex() if raw else 'EMPTY'}]")
-                  with open(os.path.join(out_dir, dll), 'wb') as fo:
+                  print(f"  {name}: {len(raw)} bytes")
+                  with open(os.path.join(out_dir, name), 'wb') as fo:
                       fo.write(raw)
-                  found.append(dll)
+                  found.append(name)
 
-          print(f"\n=== RESULT: {len(found)}/{len(needed)} ===")
-          ok = True
-          for n in needed:
-              p = os.path.join(out_dir, n)
-              if os.path.exists(p) and os.path.getsize(p) > 100:
-                  print(f"  OK   {n} ({os.path.getsize(p):,} bytes)")
-              else:
-                  print(f"  FAIL {n}")
-                  ok = False
-          if not ok:
-              sys.exit(1)
-          print("\nSUCCESS!")
+              print(f"\n=== RESULT: {len(found)}/{len(needed)} ===")
+              ok = True
+              for n in needed:
+                  p = os.path.join(out_dir, n)
+                  if os.path.exists(p) and os.path.getsize(p) > 100:
+                      print(f" OK {n} ({os.path.getsize(p):,} bytes)")
+                  else:
+                      print(f" FAIL {n}")
+                      ok = False
+              if not ok:
+                  sys.exit(1)
+              print("\nSUCCESS!")
           '@
           $script | Set-Content "extract_dlls.py" -Encoding UTF8
           python extract_dlls.py "apk_contents/lib/arm64-v8a/libassemblies.arm64-v8a.blob.so" "DependenciesDll"
@@ -196,12 +181,34 @@ jobs:
       - name: Build APK
         run: dotnet build SMAPIGameLoader/SMAPIGameLoader.csproj -c Release
 
-      - name: Cleanup large files
+      - name: Cleanup Temp Files
         shell: pwsh
         run: |
           Remove-Item "game.apk" -Force -ErrorAction SilentlyContinue
           Remove-Item "apk_contents" -Recurse -Force -ErrorAction SilentlyContinue
-          Write-Host "Cleaned. Remaining APKs:"
+          Write-Host "Temp files cleaned."
+
+      - name: Keep Only One APK
+        shell: pwsh
+        run: |
+          $apks = Get-ChildItem -Recurse -Filter "*.apk" -ErrorAction SilentlyContinue
+          Write-Host "Found APKs before cleanup:"
+          $apks | ForEach-Object { Write-Host "  $($_.Name) - $([math]::Round($_.Length/1MB,2)) MB" }
+
+          # Keep only the Signed APK (preferred)
+          $signed = $apks | Where-Object { $_.Name -like "*-Signed*" } | Select-Object -First 1
+          if ($signed) {
+              Write-Host "Keeping signed APK: $($signed.Name)"
+              $apks | Where-Object { $_.FullName -ne $signed.FullName } | Remove-Item -Force
+          }
+          else {
+              # Fallback: keep the largest one
+              $largest = $apks | Sort-Object Length -Descending | Select-Object -First 1
+              Write-Host "Keeping largest APK: $($largest.Name)"
+              $apks | Where-Object { $_.FullName -ne $largest.FullName } | Remove-Item -Force
+          }
+
+          Write-Host "Final APK:"
           Get-ChildItem -Recurse -Filter "*.apk" -ErrorAction SilentlyContinue | ForEach-Object {
             Write-Host "  $($_.FullName) ($([math]::Round($_.Length/1MB,2)) MB)"
           }
