@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.Threading;
 
 namespace SMAPIGameLoader.Tool;
 
@@ -14,7 +13,6 @@ internal static class LogTool
     {
         try
         {
-            // Clear old log on first init
             if (File.Exists(LogFilePath))
                 File.Delete(LogFilePath);
             _initialized = true;
@@ -30,11 +28,9 @@ internal static class LogTool
     static void Write(string level, string message)
     {
         string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{level}] {message}";
-        
-        // Always write to console (visible in adb logcat)
+
         Console.WriteLine(line);
-        
-        // Write to file
+
         try
         {
             lock (LockObj)
