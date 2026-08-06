@@ -21,7 +21,7 @@ internal static class StardewApkTool
     static StardewApkTool()
     {
         Console.WriteLine("Initialize Stardew Apk Tool");
-        
+
         foreach (var pkg in KnownPackageNames)
         {
             var info = ApkTool.GetPackageInfo(pkg);
@@ -67,10 +67,10 @@ internal static class StardewApkTool
     public static string? DetectedPackageName => _detectedPackageName;
 
     public static Android.Content.Context GetContext => Application.Context;
-    
+
     // CHANGED: Use SourceDir instead of PublicSourceDir for better compatibility
     public static string? BaseApkPath => CurrentPackageInfo?.ApplicationInfo?.SourceDir;
-    
+
     public static string? Arm64ApkPath
     {
         get
@@ -86,7 +86,7 @@ internal static class StardewApkTool
                         path.Contains("split_config.arm64", StringComparison.OrdinalIgnoreCase));
                     if (arm64 != null) return arm64;
                 }
-                
+
                 // Single APK fallback
                 return BaseApkPath;
             }
@@ -113,7 +113,7 @@ internal static class StardewApkTool
                         path.Contains("split_content", StringComparison.OrdinalIgnoreCase));
                     if (content != null) return content;
                 }
-                
+
                 // Single APK fallback
                 return BaseApkPath;
             }
