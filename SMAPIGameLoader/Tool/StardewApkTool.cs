@@ -15,13 +15,13 @@ internal static class StardewApkTool
         "com.zane.stardewvalley",
     };
 
-    static PackageInfo? _currentPackageInfo;
-    static string? _detectedPackageName;
+    static PackageInfo _currentPackageInfo;
+    static string _detectedPackageName;
 
     static StardewApkTool()
     {
         Console.WriteLine("Initialize Stardew Apk Tool");
-
+        
         foreach (var pkg in KnownPackageNames)
         {
             var info = ApkTool.GetPackageInfo(pkg);
@@ -29,7 +29,7 @@ internal static class StardewApkTool
             {
                 _currentPackageInfo = info;
                 _detectedPackageName = pkg;
-                Console.WriteLine($"Game found: {pkg}");
+                Console.WriteLine("Game found: " + pkg);
                 return;
             }
         }
@@ -41,14 +41,14 @@ internal static class StardewApkTool
             var apps = pm.GetInstalledApplications(PackageInfoFlags.MatchAll);
             foreach (var app in apps)
             {
-                if (app.PackageName?.Contains("stardew", StringComparison.OrdinalIgnoreCase) == true)
+                if (app.PackageName != null && app.PackageName.IndexOf("stardew", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     var info = ApkTool.GetPackageInfo(app.PackageName);
                     if (info != null)
                     {
                         _currentPackageInfo = info;
                         _detectedPackageName = app.PackageName;
-                        Console.WriteLine($"Game found via scan: {app.PackageName}");
+                        Console.WriteLine("Game found via scan: " + app.PackageName);
                         return;
                     }
                 }
@@ -62,16 +62,16 @@ internal static class StardewApkTool
         Console.WriteLine("Stardew Valley not found on device");
     }
 
-    public static PackageInfo? CurrentPackageInfo => _currentPackageInfo;
+    public static PackageInfo CurrentPackageInfo => _currentPackageInfo;
     public static bool IsInstalled => CurrentPackageInfo != null;
-    public static string? DetectedPackageName => _detectedPackageName;
+    public static string DetectedPackageName => _detectedPackageName;
 
     public static Android.Content.Context GetContext => Application.Context;
-
+    
     // CHANGED: Use SourceDir instead of PublicSourceDir for better compatibility
-    public static string? BaseApkPath => CurrentPackageInfo?.ApplicationInfo?.SourceDir;
-
-    public static string? Arm64ApkPath
+    public static string BaseApkPath => CurrentPackageInfo?.ApplicationInfo?.SourceDir;
+    
+    public static string Arm64ApkPath
     {
         get
         {
@@ -83,10 +83,10 @@ internal static class StardewApkTool
                 if (splitDirs != null && splitDirs.Length > 0)
                 {
                     var arm64 = splitDirs.FirstOrDefault(path => 
-                        path.Contains("split_config.arm64", StringComparison.OrdinalIgnoreCase));
+                        path.Contains("split_config.arm64"));
                     if (arm64 != null) return arm64;
                 }
-
+                
                 // Single APK fallback
                 return BaseApkPath;
             }
@@ -98,7 +98,7 @@ internal static class StardewApkTool
         }
     }
 
-    public static string? ContentApkPath
+    public static string ContentApkPath
     {
         get
         {
@@ -110,10 +110,10 @@ internal static class StardewApkTool
                 if (splitDirs != null && splitDirs.Length > 0)
                 {
                     var content = splitDirs.FirstOrDefault(path => 
-                        path.Contains("split_content", StringComparison.OrdinalIgnoreCase));
+                        path.Contains("split_content"));
                     if (content != null) return content;
                 }
-
+                
                 // Single APK fallback
                 return BaseApkPath;
             }
@@ -125,7 +125,7 @@ internal static class StardewApkTool
         }
     }
 
-    public static Version? GameVersionSupport => new Version(1, 6, 15, 3);
+    public static Version GameVersionSupport => new Version(1, 6, 15, 3);
 
     public static Version CurrentGameVersion
     {
