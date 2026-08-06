@@ -17,8 +17,20 @@ jobs:
         run: |
           $url = "https://www.dl.farsroid.com/game/Stardew-Valley-1.6.15.3-Mod%28www.FarsRoid.com%29.apk"
           Write-Host "Downloading Stardew Valley APK..."
-          Invoke-WebRequest -Uri $url -OutFile "game.apk" -UseBasicParsing -Headers @{
-            "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          try {
+            Invoke-WebRequest -Uri $url -OutFile "game.apk" -UseBasicParsing -Headers @{
+              "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            } -TimeoutSec 120
+          } catch {
+            Write-Host "Primary URL failed, trying fallback..."
+            $url2 = "https://dl.farsroid.com/apk/Stardew-Valley-1.6.15.3.apk"
+            Invoke-WebRequest -Uri $url2 -OutFile "game.apk" -UseBasicParsing -Headers @{
+              "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            } -TimeoutSec 120
+          }
+          if (!(Test-Path "game.apk")) {
+            Write-Host "ERROR: Failed to download APK"
+            exit 1
           }
           $size = (Get-Item "game.apk").Length
           Write-Host "Downloaded: $([math]::Round($size/1MB, 2)) MB"
@@ -26,10 +38,17 @@ jobs:
       - name: Extract APK
         shell: pwsh
         run: |
+          if (!(Test-Path "game.apk")) { Write-Host "ERROR: game.apk not found"; exit 1 }
           Expand-Archive -Path "game.apk" -DestinationPath "apk_contents" -Force
+
           $blob = "apk_contents\lib\arm64-v8a\libassemblies.arm64-v8a.blob.so"
-          if (!(Test-Path $blob)) { Write-Host "ERROR: blob not found!"; exit 1 }
-          Write-Host "Blob: $([math]::Round((Get-Item $blob).Length/1MB, 2)) MB"
+          if (!(Test-Path $blob)) {
+            Write-Host "ERROR: blob not found at expected path!"
+            Write-Host "Listing lib contents:"
+            Get-ChildItem "apk_contents\lib\arm64-v8a" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.Name }
+            exit 1
+          }
+          Write-Host "Blob found: $([math]::Round((Get-Item $blob).Length/1MB, 2)) MB"
 
       - name: Install Python LZ4
         run: pip install lz4
@@ -37,8 +56,8 @@ jobs:
       - name: Extract Game DLLs
         shell: pwsh
         run: |
-          $script = @'
-          import struct, os, sys
+          $pyScript = @"
+          import struct, os, sys, lz4.block
 
           def parse_elf_payload(filepath):
               with open(filepath, 'rb') as f:
@@ -124,7 +143,6 @@ jobs:
                   raw = P[data_start:data_start + raw_len]
                   data_start += raw_len
                   if len(raw) >= 12 and raw[:4] == b'XALZ':
-                      import lz4.block
                       usz = struct.unpack_from('<I', raw, 4)[0]
                       raw = lz4.block.decompress(raw[12:], uncompressed_size=usz)
                   print(f"  {name}: {len(raw)} bytes")
@@ -144,9 +162,27 @@ jobs:
               if not ok:
                   sys.exit(1)
               print("\nSUCCESS!")
-          '@
-          $script | Set-Content "extract_dlls.py" -Encoding UTF8
+
+          def main():
+              payload = parse_elf_payload(sys.argv[1])
+              parse_assembly_store(payload)
+
+          if __name__ == "__main__":
+              main()
+          "@
+          $pyScript | Set-Content "extract_dlls.py" -Encoding UTF8
+
           python extract_dlls.py "apk_contents/lib/arm64-v8a/libassemblies.arm64-v8a.blob.so" "DependenciesDll"
+
+          Write-Host "=== Verification ==="
+          $dlls = Get-ChildItem "DependenciesDll" -Filter "*.dll" -ErrorAction SilentlyContinue
+          if ($dlls.Count -eq 0) {
+              Write-Host "ERROR: No DLLs extracted!"
+              exit 1
+          }
+          foreach ($dll in $dlls) {
+              Write-Host "OK: $($dll.Name) ($([math]::Round($dll.Length/1KB,2)) KB)"
+          }
 
       - name: Setup .NET 9
         uses: actions/setup-dotnet@v4
@@ -166,17 +202,34 @@ jobs:
         shell: pwsh
         run: |
           $packDir = Get-ChildItem "$env:DOTNET_ROOT\packs\Microsoft.NETCore.App.Runtime.Mono.android-arm64" | Select-Object -First 1
+          if (!$packDir) {
+            Write-Host "ERROR: Mono runtime pack not found"
+            exit 1
+          }
           $target = Join-Path $packDir.FullName "runtimes\android-arm64\native\libmonosgen-2.0.so"
+          if (!(Test-Path $target)) {
+            Write-Host "ERROR: Target libmonosgen-2.0.so not found at $target"
+            exit 1
+          }
           Copy-Item "SharedLibs\native\arm64-v8a\libmonosgen-2.0.so" $target -Force
-          Write-Host "Mono runtime replaced."
+          Write-Host "Mono runtime replaced at: $target"
 
       - name: Prepare Dependencies
         shell: pwsh
         run: |
+          # Path that .csproj expects: from SMAPIGameLoader/ -> ../../ -> repo parent -> SMAPI-Android-1.6
+          # From repo root: .. -> repo parent -> SMAPI-Android-1.6
           $d = "..\SMAPI-Android-1.6\src\DependenciesDll"
           New-Item -ItemType Directory -Path $d -Force | Out-Null
           Copy-Item "DependenciesDll\*.dll" $d -Force
+
+          Write-Host "=== DLLs copied to expected path ==="
           Get-ChildItem $d | ForEach-Object { Write-Host "$($_.Name) = $([math]::Round($_.Length/1MB,2)) MB" }
+
+          # Also copy to local fallback path inside project
+          $localDir = "SMAPIGameLoader\DependenciesDll"
+          New-Item -ItemType Directory -Path $localDir -Force | Out-Null
+          Copy-Item "DependenciesDll\*.dll" $localDir -Force
 
       - name: Build APK
         run: dotnet build SMAPIGameLoader/SMAPIGameLoader.csproj -c Release
@@ -186,12 +239,18 @@ jobs:
         run: |
           Remove-Item "game.apk" -Force -ErrorAction SilentlyContinue
           Remove-Item "apk_contents" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "DependenciesDll" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "extract_dlls.py" -Force -ErrorAction SilentlyContinue
           Write-Host "Temp files cleaned."
 
       - name: Keep Only One APK
         shell: pwsh
         run: |
           $apks = Get-ChildItem -Recurse -Filter "*.apk" -ErrorAction SilentlyContinue
+          if (!$apks) {
+            Write-Host "ERROR: No APK found!"
+            exit 1
+          }
           Write-Host "Found APKs before cleanup:"
           $apks | ForEach-Object { Write-Host "  $($_.Name) - $([math]::Round($_.Length/1MB,2)) MB" }
 
