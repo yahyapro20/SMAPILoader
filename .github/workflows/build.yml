@@ -40,11 +40,9 @@ jobs:
         run: |
           if (!(Test-Path "game.apk")) { Write-Host "ERROR: game.apk not found"; exit 1 }
           Expand-Archive -Path "game.apk" -DestinationPath "apk_contents" -Force
-
           $blob = "apk_contents\lib\arm64-v8a\libassemblies.arm64-v8a.blob.so"
           if (!(Test-Path $blob)) {
-            Write-Host "ERROR: blob not found at expected path!"
-            Write-Host "Listing lib contents:"
+            Write-Host "ERROR: blob not found!"
             Get-ChildItem "apk_contents\lib\arm64-v8a" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.Name }
             exit 1
           }
@@ -56,150 +54,7 @@ jobs:
       - name: Extract Game DLLs
         shell: pwsh
         run: |
-          @'
-          import struct, os, sys, lz4.block
-
-          def find_assembly_store(data):
-              idx = data.find(b'XABA')
-              if idx < 0:
-                  raise ValueError("No XABA header found in file")
-              print(f"Found XABA at offset: {idx}")
-              return idx
-
-          def parse_assembly_store(P):
-              if len(P) < 32 or P[:4] != b'XABA':
-                  raise ValueError("Not assembly store")
-              ver = struct.unpack_from('<I', P, 4)[0]
-              local_cnt = struct.unpack_from('<I', P, 8)[0]
-              global_cnt = struct.unpack_from('<I', P, 12)[0]
-              off = 32
-              if ver >= 2:
-                  idx_total = global_cnt * 12
-                  print(f"[3] Skipping global index: {idx_total} bytes")
-                  off += idx_total
-
-              entry_sz = 28 if ver >= 2 else 24
-              entries = []
-              for i in range(local_cnt):
-                  if ver >= 2:
-                      f = struct.unpack_from('<7I', P, off)
-                      entries.append((f[1], f[2]))
-                  else:
-                      f = struct.unpack_from('<6I', P, off)
-                      entries.append((f[0], f[1]))
-                  off += entry_sz
-              print(f"[4] Read {local_cnt} entries, offset={off}")
-
-              names = []
-              for i in range(local_cnt):
-                  nlen = struct.unpack_from('=B', P, off)[0]
-                  off += 1
-                  names.append(P[off:off + nlen].decode('utf-8'))
-                  off += nlen
-              print(f"[5] Read {len(names)} names")
-
-              data_start = struct.unpack_from('<I', P, 20)[0]
-              print(f"[6] Data starts at: {data_start}")
-
-              out_dir = sys.argv[2] if len(sys.argv) > 2 else "DependenciesDll"
-              os.makedirs(out_dir, exist_ok=True)
-
-              needed = ["StardewValley.dll", "StardewValley.GameData.dll", "MonoGame.Framework.dll"]
-              found = []
-              for idx, (hash32, raw_len) in enumerate(entries):
-                  name = names[idx] if idx < len(names) else f"unknown_{idx}"
-                  raw = P[data_start:data_start + raw_len]
-                  data_start += raw_len
-                  if len(raw) >= 12 and raw[:4] == b'XALZ':
-                      usz = struct.unpack_from('<I', raw, 4)[0]
-                      raw = lz4.block.decompress(raw[12:], uncompressed_size=usz)
-                  print(f"  {name}: {len(raw)} bytes")
-                  with open(os.path.join(out_dir, name), 'wb') as fo:
-                      fo.write(raw)
-                  found.append(name)
-
-              print(f"\n=== RESULT: {len(found)}/{len(needed)} ===")
-              ok = True
-              for n in needed:
-                  p = os.path.join(out_dir, n)
-                  if os.path.exists(p) and os.path.getsize(p) > 100:
-                      print(f" OK {n} ({os.path.getsize(p):,} bytes)")
-                  else:
-                      print(f" FAIL {n}")
-                      ok = False
-              if not ok:
-                  sys.exit(1)
-              print("\nSUCCESS!")
-
-          def main():
-              blob_path = sys.argv[1]
-              with open(blob_path, 'rb') as f:
-                  data = f.read()
-              print(f"Blob file size: {len(data)} bytes")
-
-              # Try 1: Find XABA directly in file (works for non-ELF blobs too)
-              try:
-                  offset = find_assembly_store(data)
-                  parse_assembly_store(data[offset:])
-                  return
-              except Exception as e:
-                  print(f"Direct XABA parse failed: {e}")
-
-              # Try 2: Parse as ELF with .payload section
-              try:
-                  print("Trying ELF .payload section...")
-                  elf = data
-                  if elf[:4] != b'\x7fELF':
-                      raise ValueError("Not ELF")
-                  is64 = elf[4] == 2
-                  if is64:
-                      e_shoff = struct.unpack_from('=Q', elf, 0x28)[0]
-                      e_shentsize = struct.unpack_from('=H', elf, 0x3A)[0]
-                      e_shnum = struct.unpack_from('=H', elf, 0x3C)[0]
-                      e_shstrndx = struct.unpack_from('=H', elf, 0x3E)[0]
-                  else:
-                      e_shoff = struct.unpack_from('=I', elf, 0x20)[0]
-                      e_shentsize = struct.unpack_from('=H', elf, 0x2E)[0]
-                      e_shnum = struct.unpack_from('=H', elf, 0x30)[0]
-                      e_shstrndx = struct.unpack_from('=H', elf, 0x32)[0]
-
-                  shstr_off = e_shoff + e_shentsize * e_shstrndx
-                  if is64:
-                      shstr_addr = struct.unpack_from('=Q', elf, shstr_off + 0x18)[0]
-                  else:
-                      shstr_addr = struct.unpack_from('=I', elf, shstr_off + 0x16)[0]
-
-                  for i in range(e_shnum):
-                      off = e_shoff + e_shentsize * i
-                      if is64:
-                          sh_type = struct.unpack_from('=I', elf, off + 0x04)[0]
-                          sh_offset = struct.unpack_from('=Q', elf, off + 0x18)[0]
-                          sh_size = struct.unpack_from('=Q', elf, off + 0x20)[0]
-                          sh_name = struct.unpack_from('=I', elf, off + 0x00)[0]
-                      else:
-                          sh_type = struct.unpack_from('=I', elf, off + 0x04)[0]
-                          sh_offset = struct.unpack_from('=I', elf, off + 0x10)[0]
-                          sh_size = struct.unpack_from('=I', elf, off + 0x14)[0]
-                          sh_name = struct.unpack_from('=I', elf, off + 0x00)[0]
-                      name = elf[shstr_addr + sh_name:shstr_addr + sh_name + 50]
-                      name = name.split(b'\x00')[0].decode('utf-8', errors='ignore')
-                      if name == ".payload":
-                          payload = elf[sh_offset:sh_offset + sh_size]
-                          parse_assembly_store(payload)
-                          return
-                  raise ValueError("No .payload section")
-              except Exception as e:
-                  print(f"ELF parse failed: {e}")
-
-              print("\nERROR: Could not extract assemblies from blob")
-              sys.exit(1)
-
-          if __name__ == "__main__":
-              main()
-          '@ | Set-Content "extract_dlls.py" -Encoding UTF8
-
           python extract_dlls.py "apk_contents/lib/arm64-v8a/libassemblies.arm64-v8a.blob.so" "DependenciesDll"
-
           Write-Host "=== Verification ==="
           $dlls = Get-ChildItem "DependenciesDll" -Filter "*.dll" -ErrorAction SilentlyContinue
           if ($dlls.Count -eq 0) {
@@ -234,11 +89,11 @@ jobs:
           }
           $target = Join-Path $packDir.FullName "runtimes\android-arm64\native\libmonosgen-2.0.so"
           if (!(Test-Path $target)) {
-            Write-Host "ERROR: Target libmonosgen-2.0.so not found at $target"
+            Write-Host "ERROR: Target not found at $target"
             exit 1
           }
           Copy-Item "SharedLibs\native\arm64-v8a\libmonosgen-2.0.so" $target -Force
-          Write-Host "Mono runtime replaced at: $target"
+          Write-Host "Mono runtime replaced"
 
       - name: Prepare Dependencies
         shell: pwsh
@@ -246,10 +101,8 @@ jobs:
           $d = "..\SMAPI-Android-1.6\src\DependenciesDll"
           New-Item -ItemType Directory -Path $d -Force | Out-Null
           Copy-Item "DependenciesDll\*.dll" $d -Force
-
-          Write-Host "=== DLLs copied to expected path ==="
+          Write-Host "=== DLLs copied ==="
           Get-ChildItem $d | ForEach-Object { Write-Host "$($_.Name) = $([math]::Round($_.Length/1MB,2)) MB" }
-
           $localDir = "SMAPIGameLoader\DependenciesDll"
           New-Item -ItemType Directory -Path $localDir -Force | Out-Null
           Copy-Item "DependenciesDll\*.dll" $localDir -Force
@@ -263,8 +116,7 @@ jobs:
           Remove-Item "game.apk" -Force -ErrorAction SilentlyContinue
           Remove-Item "apk_contents" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item "DependenciesDll" -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item "extract_dlls.py" -Force -ErrorAction SilentlyContinue
-          Write-Host "Temp files cleaned."
+          Write-Host "Temp files cleaned"
 
       - name: Keep Only One APK
         shell: pwsh
@@ -274,23 +126,16 @@ jobs:
             Write-Host "ERROR: No APK found!"
             exit 1
           }
-          Write-Host "Found APKs before cleanup:"
+          Write-Host "Found APKs:"
           $apks | ForEach-Object { Write-Host "  $($_.Name) - $([math]::Round($_.Length/1MB,2)) MB" }
-
           $signed = $apks | Where-Object { $_.Name -like "*-Signed*" } | Select-Object -First 1
           if ($signed) {
-              Write-Host "Keeping signed APK: $($signed.Name)"
+              Write-Host "Keeping signed: $($signed.Name)"
               $apks | Where-Object { $_.FullName -ne $signed.FullName } | Remove-Item -Force
-          }
-          else {
+          } else {
               $largest = $apks | Sort-Object Length -Descending | Select-Object -First 1
-              Write-Host "Keeping largest APK: $($largest.Name)"
+              Write-Host "Keeping largest: $($largest.Name)"
               $apks | Where-Object { $_.FullName -ne $largest.FullName } | Remove-Item -Force
-          }
-
-          Write-Host "Final APK:"
-          Get-ChildItem -Recurse -Filter "*.apk" -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Host "  $($_.FullName) ($([math]::Round($_.Length/1MB,2)) MB)"
           }
 
       - name: Upload APK
