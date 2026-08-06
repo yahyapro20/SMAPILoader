@@ -56,47 +56,15 @@ jobs:
       - name: Extract Game DLLs
         shell: pwsh
         run: |
-          $pyScript = @"
+          @'
           import struct, os, sys, lz4.block
 
-          def parse_elf_payload(filepath):
-              with open(filepath, 'rb') as f:
-                  elf = f.read()
-              if elf[:4] != b'\x7fELF':
-                  raise ValueError("Not ELF")
-              is64 = elf[4] == 2
-              if is64:
-                  e_shoff = struct.unpack_from('=Q', elf, 0x28)[0]
-                  e_shentsize = struct.unpack_from('=H', elf, 0x3A)[0]
-                  e_shnum = struct.unpack_from('=H', elf, 0x3C)[0]
-                  e_shstrndx = struct.unpack_from('=H', elf, 0x3E)[0]
-              else:
-                  e_shoff = struct.unpack_from('=I', elf, 0x20)[0]
-                  e_shentsize = struct.unpack_from('=H', elf, 0x2E)[0]
-                  e_shnum = struct.unpack_from('=H', elf, 0x30)[0]
-                  e_shstrndx = struct.unpack_from('=H', elf, 0x32)[0]
-              shstr_off = e_shoff + e_shentsize * e_shstrndx
-              if is64:
-                  shstr_addr = struct.unpack_from('=Q', elf, shstr_off + 0x18)[0]
-              else:
-                  shstr_addr = struct.unpack_from('=I', elf, shstr_off + 0x16)[0]
-              for i in range(e_shnum):
-                  off = e_shoff + e_shentsize * i
-                  if is64:
-                      sh_type = struct.unpack_from('=I', elf, off + 0x04)[0]
-                      sh_offset = struct.unpack_from('=Q', elf, off + 0x18)[0]
-                      sh_size = struct.unpack_from('=Q', elf, off + 0x20)[0]
-                      sh_name = struct.unpack_from('=I', elf, off + 0x00)[0]
-                  else:
-                      sh_type = struct.unpack_from('=I', elf, off + 0x04)[0]
-                      sh_offset = struct.unpack_from('=I', elf, off + 0x10)[0]
-                      sh_size = struct.unpack_from('=I', elf, off + 0x14)[0]
-                      sh_name = struct.unpack_from('=I', elf, off + 0x00)[0]
-                  name = elf[shstr_addr + sh_name:shstr_addr + sh_name + 50]
-                  name = name.split(b'\x00')[0].decode('utf-8', errors='ignore')
-                  if name == ".payload":
-                      return elf[sh_offset:sh_offset + sh_size]
-              raise ValueError("No .payload section")
+          def find_assembly_store(data):
+              idx = data.find(b'XABA')
+              if idx < 0:
+                  raise ValueError("No XABA header found in file")
+              print(f"Found XABA at offset: {idx}")
+              return idx
 
           def parse_assembly_store(P):
               if len(P) < 32 or P[:4] != b'XABA':
@@ -164,13 +132,71 @@ jobs:
               print("\nSUCCESS!")
 
           def main():
-              payload = parse_elf_payload(sys.argv[1])
-              parse_assembly_store(payload)
+              blob_path = sys.argv[1]
+              with open(blob_path, 'rb') as f:
+                  data = f.read()
+              print(f"Blob file size: {len(data)} bytes")
+
+              # Try 1: Find XABA directly in file (works for non-ELF blobs too)
+              try:
+                  offset = find_assembly_store(data)
+                  parse_assembly_store(data[offset:])
+                  return
+              except Exception as e:
+                  print(f"Direct XABA parse failed: {e}")
+
+              # Try 2: Parse as ELF with .payload section
+              try:
+                  print("Trying ELF .payload section...")
+                  elf = data
+                  if elf[:4] != b'\x7fELF':
+                      raise ValueError("Not ELF")
+                  is64 = elf[4] == 2
+                  if is64:
+                      e_shoff = struct.unpack_from('=Q', elf, 0x28)[0]
+                      e_shentsize = struct.unpack_from('=H', elf, 0x3A)[0]
+                      e_shnum = struct.unpack_from('=H', elf, 0x3C)[0]
+                      e_shstrndx = struct.unpack_from('=H', elf, 0x3E)[0]
+                  else:
+                      e_shoff = struct.unpack_from('=I', elf, 0x20)[0]
+                      e_shentsize = struct.unpack_from('=H', elf, 0x2E)[0]
+                      e_shnum = struct.unpack_from('=H', elf, 0x30)[0]
+                      e_shstrndx = struct.unpack_from('=H', elf, 0x32)[0]
+
+                  shstr_off = e_shoff + e_shentsize * e_shstrndx
+                  if is64:
+                      shstr_addr = struct.unpack_from('=Q', elf, shstr_off + 0x18)[0]
+                  else:
+                      shstr_addr = struct.unpack_from('=I', elf, shstr_off + 0x16)[0]
+
+                  for i in range(e_shnum):
+                      off = e_shoff + e_shentsize * i
+                      if is64:
+                          sh_type = struct.unpack_from('=I', elf, off + 0x04)[0]
+                          sh_offset = struct.unpack_from('=Q', elf, off + 0x18)[0]
+                          sh_size = struct.unpack_from('=Q', elf, off + 0x20)[0]
+                          sh_name = struct.unpack_from('=I', elf, off + 0x00)[0]
+                      else:
+                          sh_type = struct.unpack_from('=I', elf, off + 0x04)[0]
+                          sh_offset = struct.unpack_from('=I', elf, off + 0x10)[0]
+                          sh_size = struct.unpack_from('=I', elf, off + 0x14)[0]
+                          sh_name = struct.unpack_from('=I', elf, off + 0x00)[0]
+                      name = elf[shstr_addr + sh_name:shstr_addr + sh_name + 50]
+                      name = name.split(b'\x00')[0].decode('utf-8', errors='ignore')
+                      if name == ".payload":
+                          payload = elf[sh_offset:sh_offset + sh_size]
+                          parse_assembly_store(payload)
+                          return
+                  raise ValueError("No .payload section")
+              except Exception as e:
+                  print(f"ELF parse failed: {e}")
+
+              print("\nERROR: Could not extract assemblies from blob")
+              sys.exit(1)
 
           if __name__ == "__main__":
               main()
-          "@
-          $pyScript | Set-Content "extract_dlls.py" -Encoding UTF8
+          '@ | Set-Content "extract_dlls.py" -Encoding UTF8
 
           python extract_dlls.py "apk_contents/lib/arm64-v8a/libassemblies.arm64-v8a.blob.so" "DependenciesDll"
 
@@ -217,8 +243,6 @@ jobs:
       - name: Prepare Dependencies
         shell: pwsh
         run: |
-          # Path that .csproj expects: from SMAPIGameLoader/ -> ../../ -> repo parent -> SMAPI-Android-1.6
-          # From repo root: .. -> repo parent -> SMAPI-Android-1.6
           $d = "..\SMAPI-Android-1.6\src\DependenciesDll"
           New-Item -ItemType Directory -Path $d -Force | Out-Null
           Copy-Item "DependenciesDll\*.dll" $d -Force
@@ -226,7 +250,6 @@ jobs:
           Write-Host "=== DLLs copied to expected path ==="
           Get-ChildItem $d | ForEach-Object { Write-Host "$($_.Name) = $([math]::Round($_.Length/1MB,2)) MB" }
 
-          # Also copy to local fallback path inside project
           $localDir = "SMAPIGameLoader\DependenciesDll"
           New-Item -ItemType Directory -Path $localDir -Force | Out-Null
           Copy-Item "DependenciesDll\*.dll" $localDir -Force
@@ -254,14 +277,12 @@ jobs:
           Write-Host "Found APKs before cleanup:"
           $apks | ForEach-Object { Write-Host "  $($_.Name) - $([math]::Round($_.Length/1MB,2)) MB" }
 
-          # Keep only the Signed APK (preferred)
           $signed = $apks | Where-Object { $_.Name -like "*-Signed*" } | Select-Object -First 1
           if ($signed) {
               Write-Host "Keeping signed APK: $($signed.Name)"
               $apks | Where-Object { $_.FullName -ne $signed.FullName } | Remove-Item -Force
           }
           else {
-              # Fallback: keep the largest one
               $largest = $apks | Sort-Object Length -Descending | Select-Object -First 1
               Write-Host "Keeping largest APK: $($largest.Name)"
               $apks | Where-Object { $_.FullName -ne $largest.FullName } | Remove-Item -Force
