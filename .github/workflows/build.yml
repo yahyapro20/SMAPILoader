@@ -15,7 +15,7 @@ jobs:
       - name: Download Game APK
         shell: pwsh
         run: |
-          $url = "https://www.dl.farsroid.com/game/Stardew-Valley-1.6.15.3-Mod%28www.FarsRoid.com%29.apk"
+          $url = "https://www.dl.farsroid.com/game/Stardew-Valley-1.6.15.3(www.FarsRoid.com).apk"
           Write-Host "Downloading Stardew Valley APK..."
           try {
             Invoke-WebRequest -Uri $url -OutFile "game.apk" -UseBasicParsing -Headers @{
