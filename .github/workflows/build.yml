@@ -53,6 +53,8 @@ jobs:
 
       - name: Extract Game DLLs
         shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           python extract_dlls.py "apk_contents/lib/arm64-v8a/libassemblies.arm64-v8a.blob.so" "DependenciesDll"
           Write-Host "=== Verification ==="
