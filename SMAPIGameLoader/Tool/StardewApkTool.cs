@@ -80,7 +80,9 @@ internal static class StardewApkTool
                 if (CurrentPackageInfo == null) return null;
 
                 var splitDirs = CurrentPackageInfo.ApplicationInfo?.SplitSourceDirs;
-                if (splitDirs != null && splitDirs.Length > 0)
+                
+                // FIX: Changed .Length to .Count for IList<string> compatibility
+                if (splitDirs != null && splitDirs.Count > 0)
                 {
                     var arm64 = splitDirs.FirstOrDefault(path => 
                         path.Contains("split_config.arm64", StringComparison.OrdinalIgnoreCase));
@@ -107,7 +109,9 @@ internal static class StardewApkTool
                 if (CurrentPackageInfo == null) return null;
 
                 var splitDirs = CurrentPackageInfo.ApplicationInfo?.SplitSourceDirs;
-                if (splitDirs != null && splitDirs.Length > 0)
+                
+                // FIX: Changed .Length to .Count for IList<string> compatibility
+                if (splitDirs != null && splitDirs.Count > 0)
                 {
                     var content = splitDirs.FirstOrDefault(path => 
                         path.Contains("split_content", StringComparison.OrdinalIgnoreCase));
