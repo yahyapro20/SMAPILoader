@@ -11,7 +11,6 @@ except ImportError:
 COMPRESSED_DATA_MAGIC = b'XALZ'
 
 def find_payload_section(data):
-    """فایل ELF را می‌خواند و Section مخفی payload را پیدا می‌کند"""
     if data[:4] != b'\x7fELF':
         raise ValueError("Not an ELF file")
     
@@ -46,23 +45,19 @@ def find_payload_section(data):
     raise ValueError("Section 'payload' not found in ELF")
 
 def extract_maui_dlls(payload_data, out_dir):
-    """ساختار جدید MAUI 9 AssemblyStore را پارس می‌کند"""
     os.makedirs(out_dir, exist_ok=True)
     
-    # Header (20 bytes)
     magic, version, entry_count, index_entry_count, index_size = struct.unpack_from('<5I', payload_data, 0)
     print(f"MAUI AssemblyStore - Version: {version}, Entries: {entry_count}, IndexSize: {index_size}")
     
     offset = 20 + index_size
     
-    # Descriptors (7 ints = 28 bytes each)
     descriptors = []
     for _ in range(entry_count):
         desc = struct.unpack_from('<7I', payload_data, offset)
         descriptors.append(desc)
         offset += 28
         
-    # Names
     names = []
     for i in range(entry_count):
         if offset + 4 > len(payload_data):
@@ -92,7 +87,6 @@ def extract_maui_dlls(payload_data, out_dir):
             
         assembly_data = payload_data[data_offset:data_offset+data_size]
         
-        # Check for LZ4 compression (XALZ header)
         if assembly_data.startswith(COMPRESSED_DATA_MAGIC):
             uncompressed_size = struct.unpack_from('<I', assembly_data, 8)[0]
             assembly_data = lz4.block.decompress(assembly_data[12:], uncompressed_size=uncompressed_size)
@@ -100,7 +94,7 @@ def extract_maui_dlls(payload_data, out_dir):
         out_path = os.path.join(out_dir, name)
         with open(out_path, 'wb') as f:
             f.write(assembly_data)
-        print(f"✅ Extracted: {name} ({len(assembly_data)} bytes)")
+        print(f"[OK] Extracted: {name} ({len(assembly_data)} bytes)")
         extracted_count += 1
         
     return extracted_count
