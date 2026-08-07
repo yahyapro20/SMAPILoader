@@ -1,145 +1,126 @@
-name: Build SMAPI APK
+import struct
+import os
+import sys
 
-on:
-  workflow_dispatch:
+# Fix Windows console encoding issues (حل مشکل ایموجی در ویندوز)
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8')
 
-jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 45
+try:
+    import lz4.block
+except ImportError:
+    print("ERROR: pip install lz4")
+    sys.exit(1)
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+COMPRESSED_DATA_MAGIC = b'XALZ'
 
-      - name: Download Game APK
-        shell: pwsh
-        run: |
-          $url = "https://www.dl.farsroid.com/game/Stardew-Valley-1.6.15.3(www.FarsRoid.com).apk"
-          Write-Host "Downloading Stardew Valley APK..."
-          try {
-            Invoke-WebRequest -Uri $url -OutFile "game.apk" -UseBasicParsing -Headers @{
-              "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            } -TimeoutSec 120
-          } catch {
-            Write-Host "Primary URL failed, trying fallback..."
-            $url2 = "https://dl.farsroid.com/apk/Stardew-Valley-1.6.15.3.apk"
-            Invoke-WebRequest -Uri $url2 -OutFile "game.apk" -UseBasicParsing -Headers @{
-              "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            } -TimeoutSec 120
-          }
-          if (!(Test-Path "game.apk")) {
-            Write-Host "ERROR: Failed to download APK"
-            exit 1
-          }
-          $size = (Get-Item "game.apk").Length
-          Write-Host "Downloaded: $([math]::Round($size/1MB, 2)) MB"
+def find_payload_section(data):
+    if data[:4] != b'\x7fELF':
+        raise ValueError("Not an ELF file")
+    
+    is64 = data[4] == 2
+    if is64:
+        e_shoff = struct.unpack_from('<Q', data, 0x28)[0]
+        e_shentsize = struct.unpack_from('<H', data, 0x3A)[0]
+        e_shnum = struct.unpack_from('<H', data, 0x3C)[0]
+        e_shstrndx = struct.unpack_from('<H', data, 0x3E)[0]
+    else:
+        e_shoff = struct.unpack_from('<I', data, 0x20)[0]
+        e_shentsize = struct.unpack_from('<H', data, 0x2E)[0]
+        e_shnum = struct.unpack_from('<H', data, 0x30)[0]
+        e_shstrndx = struct.unpack_from('<H', data, 0x32)[0]
+        
+    shstr_off_field = 0x18 if is64 else 0x10
+    shstr_header_offset = e_shoff + (e_shentsize * e_shstrndx)
+    shstr_offset = struct.unpack_from('<Q' if is64 else '<I', data, shstr_header_offset + shstr_off_field)[0]
+    
+    for i in range(e_shnum):
+        sec_header = e_shoff + (e_shentsize * i)
+        sh_name_offset = struct.unpack_from('<I', data, sec_header)[0]
+        name_start = shstr_offset + sh_name_offset
+        name_end = data.find(b'\x00', name_start)
+        name = data[name_start:name_end].decode('utf-8', errors='ignore')
+        
+        if name == 'payload':
+            sh_offset = struct.unpack_from('<Q' if is64 else '<I', data, sec_header + shstr_off_field)[0]
+            sh_size = struct.unpack_from('<Q' if is64 else '<I', data, sec_header + (0x20 if is64 else 0x14))[0]
+            return data[sh_offset:sh_offset+sh_size]
+            
+    raise ValueError("Section 'payload' not found in ELF")
 
-      - name: Extract APK
-        shell: pwsh
-        run: |
-          if (!(Test-Path "game.apk")) { Write-Host "ERROR: game.apk not found"; exit 1 }
-          Expand-Archive -Path "game.apk" -DestinationPath "apk_contents" -Force
-          $blob = "apk_contents\lib\arm64-v8a\libassemblies.arm64-v8a.blob.so"
-          if (!(Test-Path $blob)) {
-            Write-Host "ERROR: blob not found!"
-            Get-ChildItem "apk_contents\lib\arm64-v8a" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.Name }
-            exit 1
-          }
-          Write-Host "Blob found: $([math]::Round((Get-Item $blob).Length/1MB, 2)) MB"
+def extract_maui_dlls(payload_data, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+    
+    magic, version, entry_count, index_entry_count, index_size = struct.unpack_from('<5I', payload_data, 0)
+    print(f"MAUI AssemblyStore - Version: {version}, Entries: {entry_count}, IndexSize: {index_size}")
+    
+    offset = 20 + index_size
+    
+    descriptors = []
+    for _ in range(entry_count):
+        desc = struct.unpack_from('<7I', payload_data, offset)
+        descriptors.append(desc)
+        offset += 28
+        
+    names = []
+    for i in range(entry_count):
+        if offset + 4 > len(payload_data):
+            names.append(f"unknown_{i}")
+            continue
+        name_len = struct.unpack_from('<I', payload_data, offset)[0]
+        offset += 4
+        if offset + name_len > len(payload_data):
+            names.append(f"unknown_{i}")
+            continue
+        name = payload_data[offset:offset+name_len].decode('utf-8', errors='ignore')
+        names.append(name)
+        offset += name_len
+        
+    needed = ["stardewvalley.dll", "stardewvalley.gamedata.dll", "monogame.framework.dll"]
+    extracted_count = 0
+    
+    for i in range(entry_count):
+        name = names[i]
+        data_offset, data_size = descriptors[i][1], descriptors[i][2]
+        
+        if name.lower() not in needed:
+            continue
+            
+        if not name.endswith('.dll'):
+            name += '.dll'
+            
+        assembly_data = payload_data[data_offset:data_offset+data_size]
+        
+        if assembly_data.startswith(COMPRESSED_DATA_MAGIC):
+            uncompressed_size = struct.unpack_from('<I', assembly_data, 8)[0]
+            assembly_data = lz4.block.decompress(assembly_data[12:], uncompressed_size=uncompressed_size)
+            
+        out_path = os.path.join(out_dir, name)
+        with open(out_path, 'wb') as f:
+            f.write(assembly_data)
+        print(f"[OK] Extracted: {name} ({len(assembly_data)} bytes)")
+        extracted_count += 1
+        
+    return extracted_count
 
-      - name: Install Python LZ4
-        run: pip install lz4
+def main():
+    blob_path = sys.argv[1]
+    out_dir = sys.argv[2] if len(sys.argv) > 2 else "DependenciesDll"
+    
+    with open(blob_path, 'rb') as f:
+        so_data = f.read()
+        
+    print("[INFO] Finding 'payload' section in ELF...")
+    try:
+        payload = find_payload_section(so_data)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+        
+    print(f"[INFO] Payload section found ({len(payload)} bytes). Extracting DLLs...")
+    count = extract_maui_dlls(payload, out_dir)
+    
+    print(f"\n[SUCCESS] {count} targeted DLLs extracted into '{out_dir}'")
 
-      - name: Extract Game DLLs
-        shell: pwsh
-        run: |
-          python extract_dlls.py "apk_contents/lib/arm64-v8a/libassemblies.arm64-v8a.blob.so" "DependenciesDll"
-          Write-Host "=== Verification ==="
-          $dlls = Get-ChildItem "DependenciesDll" -Filter "*.dll" -ErrorAction SilentlyContinue
-          if ($dlls.Count -eq 0) {
-              Write-Host "ERROR: No DLLs extracted!"
-              exit 1
-          }
-          foreach ($dll in $dlls) {
-              Write-Host "OK: $($dll.Name) ($([math]::Round($dll.Length/1KB,2)) KB)"
-          }
-
-      - name: Setup .NET 9
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 9.0.x
-
-      - name: Setup JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Install Android Workload
-        run: dotnet workload install android
-
-      - name: Install Custom Mono Runtime
-        shell: pwsh
-        run: |
-          $packDir = Get-ChildItem "$env:DOTNET_ROOT\packs\Microsoft.NETCore.App.Runtime.Mono.android-arm64" | Select-Object -First 1
-          if (!$packDir) {
-            Write-Host "ERROR: Mono runtime pack not found"
-            exit 1
-          }
-          $target = Join-Path $packDir.FullName "runtimes\android-arm64\native\libmonosgen-2.0.so"
-          if (!(Test-Path $target)) {
-            Write-Host "ERROR: Target not found at $target"
-            exit 1
-          }
-          Copy-Item "SharedLibs\native\arm64-v8a\libmonosgen-2.0.so" $target -Force
-          Write-Host "Mono runtime replaced"
-
-      - name: Prepare Dependencies
-        shell: pwsh
-        run: |
-          $d = "..\SMAPI-Android-1.6\src\DependenciesDll"
-          New-Item -ItemType Directory -Path $d -Force | Out-Null
-          Copy-Item "DependenciesDll\*.dll" $d -Force
-          Write-Host "=== DLLs copied ==="
-          Get-ChildItem $d | ForEach-Object { Write-Host "$($_.Name) = $([math]::Round($_.Length/1MB,2)) MB" }
-          $localDir = "SMAPIGameLoader\DependenciesDll"
-          New-Item -ItemType Directory -Path $localDir -Force | Out-Null
-          Copy-Item "DependenciesDll\*.dll" $localDir -Force
-
-      - name: Build APK
-        run: dotnet build SMAPIGameLoader/SMAPIGameLoader.csproj -c Release
-
-      - name: Cleanup Temp Files
-        shell: pwsh
-        run: |
-          Remove-Item "game.apk" -Force -ErrorAction SilentlyContinue
-          Remove-Item "apk_contents" -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item "DependenciesDll" -Recurse -Force -ErrorAction SilentlyContinue
-          Write-Host "Temp files cleaned"
-
-      - name: Keep Only One APK
-        shell: pwsh
-        run: |
-          $apks = Get-ChildItem -Recurse -Filter "*.apk" -ErrorAction SilentlyContinue
-          if (!$apks) {
-            Write-Host "ERROR: No APK found!"
-            exit 1
-          }
-          Write-Host "Found APKs:"
-          $apks | ForEach-Object { Write-Host "  $($_.Name) - $([math]::Round($_.Length/1MB,2)) MB" }
-          $signed = $apks | Where-Object { $_.Name -like "*-Signed*" } | Select-Object -First 1
-          if ($signed) {
-              Write-Host "Keeping signed: $($signed.Name)"
-              $apks | Where-Object { $_.FullName -ne $signed.FullName } | Remove-Item -Force
-          } else {
-              $largest = $apks | Sort-Object Length -Descending | Select-Object -First 1
-              Write-Host "Keeping largest: $($largest.Name)"
-              $apks | Where-Object { $_.FullName -ne $largest.FullName } | Remove-Item -Force
-          }
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: SMAPI-Loader-APK
-          path: 'SMAPIGameLoader/bin/**/*.apk'
+if __name__ == "__main__":
+    main()
